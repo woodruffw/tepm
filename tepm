@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+TEPM_CONFIG="${HOME}/.tepmrc"
+
+# override this in ${TEPM_CONFIG}
+TEPM_KERN="$(uname -s)"
+TEPM_ARCH="$(uname -m)"
+
+function installed() {
+	local cmd=$(command -v "${1}")
+
+	[[ -n "${cmd}" ]] && [[ -f "${cmd}" ]]
+	return ${?}
+}
+
+function available() {
+	type -t "${1}" > /dev/null
+	return ${?}
+}
+
+function confirm() {
+	printf "${*} (y/N): " && read ans
+
+	[[ -n "${ans}" && "${ans}" =~ [Yy] ]]
+	return ${?}
+}
+
+function fatal() {
+	printf "Fatal: ${*}\n"
+	exit 1
+}
+
+function usage() {
+	printf "Usage: $(basename ${0}) <command>\n"
+	printf "Available commands are:\n"
+	tepm_commands
+	exit 1
+}
+
+function precheck() {
+	local deps=(scp sha256sum) # don't bother checking utilities we use posixly
+
+	for dep in "${deps[@]}"; do
+		installed "${dep}" || fatal "tepm needs '${dep}' to operate."
+	done
+}
+
+function load_config() {
+	if [[ ! -f "${TEPM_CONFIG}" ]]; then
+		fatal "No configuration file found. Run 'tepm config' to generate one."
+	fi
+
+	source "${TEPM_CONFIG}"
+	[[ -z "${TEPM_USER}" ]] && fatal "TEPM_USER missing, rerun 'tepm config'."
+	[[ -z "${TEPM_HOST}" ]] && fatal "TEPM_HOST missing, rerun 'tepm config'."
+}
+
+function sftp_ls() {
+	files=$(printf "ls ${1}" | sftp -b - "${TEPM_USER}@${TEPM_HOST}" 2> /dev/null)
+	ret=${?}
+	printf "${files}" | sed '1d'
+
+	return ${ret} # return code masking sucks
+}
+
+function tepm_commands() {
+	local functions=($(declare -F | awk '{ print $3 }' | grep 'tepm'))
+	for func in "${functions[@]}"; do
+		printf "${func#tepm_}\n"
+	done
+}
+
+function tepm_config() {
+	if [[ -f "${TEPM_CONFIG}" ]]; then
+		confirm "Overwrite existing configuration?" || exit 0
+	fi
+
+	printf "To install packages, tepm uses SSH sessions.\n"
+	printf "As such, it requires a username to log in with and a host.\n"
+	printf "Enter a username for tepm to connect with: "
+	read tepm_user
+	printf "Enter a hostname for tepm to connect with: "
+	read tepm_host
+
+	printf "TEPM_USER='${tepm_user}'\n" > "${TEPM_CONFIG}"
+	printf "TEPM_HOST='${tepm_host}'\n" >> "${TEPM_CONFIG}"
+}
+
+function tepm_pkg() {
+	echo pkg stub
+}
+
+function tepm_list() {
+	if ! packages=$(sftp_ls "tepm/${TEPM_KERN}/${TEPM_ARCH}"); then
+		fatal "Couldn't list packages (no connection or missing directories)."
+	fi
+
+	printf "${packages}"
+}
+
+function tepm_install() {
+	echo install stub
+}
+
+function tepm_uninstall() {
+	echo uninstall stub
+}
+
+function tepm_upgrade() {
+	echo upgrade stub
+}
+
+function tepm_help() {
+	usage
+}
+
+precheck
+
+[[ -z "${1}" ]] && usage
+
+cmd="${1}" && shift
+
+[[ "${cmd}" != "config" ]] && load_config
+
+if available tepm_${cmd}; then
+	tepm_${cmd} $@
+else
+	printf "No such command: ${cmd}\n"
+fi
