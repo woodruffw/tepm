@@ -63,9 +63,9 @@ function load_config() {
 }
 
 function sftp_ls() {
-	files=$(printf "ls tepm/${1}" | sftp -b - "${TEPM_USER}@${TEPM_HOST}")
+	files=$(printf "ls -l tepm/${1}" | sftp -b - "${TEPM_USER}@${TEPM_HOST}")
 	ret=${?}
-	printf "${files}" | sed '1d'
+	printf "${files}" | sed '1d' | awk '{ print $9 }'
 
 	return ${ret} # return code masking sucks
 }
@@ -120,9 +120,7 @@ function tepm_list() {
 		fatal "Couldn't list packages (no connection or missing directories)."
 	fi
 
-	for pkg in "${pkgs}"; do
-		printf "$(basename ${pkg})\n"
-	done
+	printf "${pkgs}\n"
 }
 
 function tepm_install() {
