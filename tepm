@@ -2,9 +2,11 @@
 
 TEPM_CONFIG="${HOME}/.tepmrc"
 
-# override this in ${TEPM_CONFIG}
+# override these in ${TEPM_CONFIG}
 TEPM_KERN="$(uname -s)"
 TEPM_ARCH="$(uname -m)"
+TEPM_BIN="${HOME}/bin"
+TEPM_MAN="${HOME}/man"
 
 function installed() {
 	local cmd=$(command -v "${1}")
@@ -38,11 +40,16 @@ function usage() {
 }
 
 function precheck() {
-	local deps=(scp sha256sum) # don't bother checking utilities we use posixly
+	[[ "${BASH_VERSINFO[0]}" -lt 4 ]] && fatal "bash 4.0 or later is required."
+
+	# don't bother checking POSIX utilities
+	local deps=(scp sha256sum)
 
 	for dep in "${deps[@]}"; do
 		installed "${dep}" || fatal "tepm needs '${dep}' to operate."
 	done
+
+	mkdir -p "${TEPM_BIN}" "${TEPM_MAN}"
 }
 
 function load_config() {
@@ -56,11 +63,16 @@ function load_config() {
 }
 
 function sftp_ls() {
-	files=$(printf "ls ${1}" | sftp -b - "${TEPM_USER}@${TEPM_HOST}" 2> /dev/null)
+	files=$(printf "ls tepm/${1}" | sftp -b - "${TEPM_USER}@${TEPM_HOST}")
 	ret=${?}
 	printf "${files}" | sed '1d'
 
 	return ${ret} # return code masking sucks
+}
+
+function scp_fetch() {
+	echo "${TEPM_USER}@${TEPM_HOST}:/home/${TEPM_USER}/tepm/${1}"
+	scp -r "${TEPM_USER}@${TEPM_HOST}:/home/${TEPM_USER}/tepm/${1}" "${2}"
 }
 
 function tepm_commands() {
@@ -87,19 +99,58 @@ function tepm_config() {
 }
 
 function tepm_pkg() {
-	echo pkg stub
+	[[ -d "${1}" ]] || fatal "A directory is required to create packages."
+
+	pushd . > /dev/null
+	cd "${1}"
+
+	for subdir in *; do
+		# subdir=$(basename "${subdir}")
+		if [[ "${subdir}" != "bin" && "${subdir}" != "man" ]]; then
+			fatal "An unrecognized subdirectory '${subdir}' was encountered."
+		fi
+	done
+
+	sha256sum */* > checksums
+
+	popd > /dev/null
 }
 
 function tepm_list() {
-	if ! packages=$(sftp_ls "tepm/${TEPM_KERN}/${TEPM_ARCH}"); then
+	if ! pkgs=$(sftp_ls "${TEPM_KERN}/${TEPM_ARCH}"); then
 		fatal "Couldn't list packages (no connection or missing directories)."
 	fi
 
-	printf "${packages}"
+	for pkg in "${pkgs}"; do
+		printf "$(basename ${pkg})\n"
+	done
 }
 
 function tepm_install() {
-	echo install stub
+	local work_dir=$(mktemp -d "${HOME}/.tepm_XXX")
+	if ! scp_fetch "${TEPM_KERN}/${TEPM_ARCH}/${1}" "${work_dir}"; then
+		rm -rf "${work_dir}"
+		fatal "Couldn't fetch package (no connection or missing directories)."
+	fi
+
+	pushd . > /dev/null
+	cd "${work_dir}/${1}"
+
+	if ! sha256sum --status -c checksums; then
+		rm -rf "${work_dir}"
+		fatal "Checksum failure during installation of '${1}'".
+	fi
+
+	cp bin/* "${TEPM_BIN}"
+
+	for manpage in man/*; do
+		local suffix="${manpage#*.}"
+		mkdir -p "${TEPM_MAN}/man${suffix}"
+		cp "${manpage}" "${TEPM_MAN}/man${suffix}"
+	done
+
+	popd > /dev/null
+	rm -rf "${work_dir}"
 }
 
 function tepm_uninstall() {
