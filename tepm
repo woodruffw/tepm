@@ -179,10 +179,6 @@ function tepm_uninstall() {
 	rm -rf "${work_dir}"
 }
 
-function tepm_upgrade() {
-	echo upgrade stub
-}
-
 function tepm_help() {
 	usage
 }
