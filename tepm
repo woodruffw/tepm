@@ -105,7 +105,6 @@ function tepm_pkg() {
 	cd "${1}"
 
 	for subdir in *; do
-		# subdir=$(basename "${subdir}")
 		if [[ "${subdir}" != "bin" && "${subdir}" != "man" ]]; then
 			fatal "An unrecognized subdirectory '${subdir}' was encountered."
 		fi
@@ -154,7 +153,30 @@ function tepm_install() {
 }
 
 function tepm_uninstall() {
-	echo uninstall stub
+	# to uninstall, all we need to do is fetch the checksums file and parse it
+	local work_dir=$(mktemp -d "${HOME}/.tepm_XXX")
+	if ! scp_fetch "${TEPM_KERN}/${TEPM_ARCH}/${1}/checksums" "${work_dir}"; then
+		rm -rf "${work_dir}"
+		fatal "Couldn't fetch package (no connection or missing directories)."
+	fi
+
+	pushd . > /dev/null
+	cd "${work_dir}"
+
+	local bins=$(cat checksums | awk '{ print $2 }' | grep '^bin/')
+	local mans=$(cat checksums | awk '{ print $2 }' | grep '^man/')
+
+	cd "${HOME}"
+	rm "${bins}"
+
+	for manpage in "${mans}"; do
+		manpage=$(basename "${manpage}")
+		local suffix="${manpage#*.}"
+		rm "${TEPM_MAN}/man${suffix}/${manpage}"
+	done
+
+	popd > /dev/null
+	rm -rf "${work_dir}"
 }
 
 function tepm_upgrade() {
