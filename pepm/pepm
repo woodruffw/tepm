@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+shopt -s nullglob
+
+function installed {
+    cmd=$(command -v "${1}")
+
+    [[ -n "${cmd}" ]] && [[ -f "${cmd}" ]]
+    return ${?}
+}
+
+function verbose {
+    [[ -n "${VERBOSE}" ]] && >&2 echo "[+] $*"
+    return 0
+}
+
+function bye {
+    echo "$*"
+    exit 0
+}
+
+function die {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+function ensure {
+    "$@" \
+        || die "Failed to run '$*'. Aborting."
+}
+
+function usage {
+    echo "Usage: pepm <command>"
+    echo "Commands:"
+    pepm_commands
+}
+
+function fetch {
+    verbose "Fetch: ${1}"
+    curl -s "${1}"
+}
+
+function fetch_file {
+    verbose "Fetch file: ${2}"
+    curl -s -o "${1}" "${2}"
+}
+
+function package_line {
+    pepm_remote-list | grep "^${1} "
+}
+
+function add_manifest_entry {
+    echo "${1}" >> "${PEPM_MANIFEST}"
+}
+
+function get_manifest_entry {
+    [[ -f "${PEPM_MANIFEST}" ]] && grep "^${1} " "${PEPM_MANIFEST}"
+    return 0
+}
+
+function rm_manifest_entry {
+    [[ -f "${PEPM_MANIFEST}" ]] && sed -i.bak "/^${1} /d" "${PEPM_MANIFEST}"
+    return 0
+}
+
+function receipt {
+    file="${PEPM_STORE}/pkg/${1}"
+    echo "${2}" >> "${file}"
+}
+
+function pepm_remote-list {
+    fetch "${PEPM_SOURCE}/packages"
+}
+
+function pepm_list {
+    [[ -f "${PEPM_MANIFEST}" ]] && awk '{ print $1 }' < "${PEPM_MANIFEST}"
+}
+
+function pepm_upgrade {
+    for pkgname in $(pepm_list); do
+        pepm_install "${pkgname}"
+    done
+}
+
+function pepm_install {
+    [[ -n "${1}" ]] || bye "Usage: pepm install <package>"
+    pkgname="${1}"
+    line=$(package_line "${pkgname}") || die "No such package: ${pkgname}"
+    remote_version=$(awk '{ print $2 }' <<< "${line}")
+    remote_checksum=$(awk '{ print $3 }' <<< "${line}")
+
+    echo "Remote: Found ${pkgname} with version ${remote_version}"
+    verbose "Install: Got package line: ${line}"
+
+    # Validate arch.
+    arches=$(cut -d' ' -f4- <<< "${line}")
+    grep -qF "${PEPM_TARGET}" <<< "${arches}" \
+        || die "Incompatible target (have ${PEPM_TARGET}, need one of: ${arches})"
+
+    curr=$(get_manifest_entry "${pkgname}")
+
+    if [[ -n "${curr}" ]]; then
+        echo "Local: ${pkgname} already installed, checking if outdated"
+        verbose "Install: Got manifest entry: ${curr}"
+
+        local_version=$(awk '{ print $2 }' <<< "${curr}")
+
+        [[ "${local_version}" = "${remote_version}" ]] \
+            && bye "Package ${pkgname} already up-to-date."
+
+        echo "Removing ${pkgname} ${local_version} in favor of ${remote_version}..."
+        pepm_uninstall "${pkgname}"
+    fi
+
+    tarball="/tmp/${pkgname}-${remote_version}.tar.gz"
+
+    rm -rf "${tarball}"
+
+    # Fetch package, validate checksum.
+    fetch_file "${tarball}" \
+        "${PEPM_SOURCE}/${PEPM_TARGET}/${pkgname}.tar.gz"
+
+    local_checksum=$(crc32 "${tarball}")
+
+    verbose "Local checksum: ${local_checksum}"
+
+    [[ "${local_checksum}" = "${remote_checksum}" ]] \
+        || die "Mismatching checksums: local ${local_checksum}, remote ${remote_checksum}"
+
+
+    stage="/tmp/${pkgname}-${remote_version}"
+    rm -rf "${stage}"
+    mkdir -p "${stage}"
+
+    tar xzf "${tarball}" -C "${stage}"
+
+    verbose "Stage: Copying bin/"
+    for file in ${stage}/bin/*; do
+        cp "${file}" "${PEPM_BIN}"
+        receipt "${pkgname}" "${PEPM_BIN}/$(basename "${file}")"
+    done
+
+    verbose "Stage: Copying man/"
+    for file in ${stage}/man/*; do
+        cp "${file}" "${PEPM_MAN}"
+        receipt "${pkgname}" "${PEPM_MAN}/$(basename "${file}")"
+    done
+
+    rm -rf "${stage}"
+    rm -rf "${tarball}"
+
+    rm_manifest_entry "${pkgname}"
+    add_manifest_entry "${line}"
+
+    echo "${pkgname} ${remote_version} successfully installed."
+}
+
+function pepm_uninstall {
+    [[ -n "${1}" ]] || bye "Usage: pepm uninstall <package>"
+
+    pkgname="${1}"
+    receipt="${PEPM_STORE}/pkg/${pkgname}"
+
+    echo "Uninstalling ${pkgname}"
+
+    if [[ -f "${receipt}" ]]; then
+        while read line; do
+            verbose "Uninstall: Removing ${line}"
+            rm -rf line
+        done < "${receipt}"
+
+        rm -rf "${receipt}"
+    else
+        echo "No install receipt, grumble grumble..."
+    fi
+
+    rm_manifest_entry "${pkgname}"
+}
+
+function pepm_build {
+    [[ -d "${1}" && -n "${2}" ]] \
+        || bye "Usage: pepm build <directory> <version>"
+
+    pkgname=$(basename "${1}")
+    pkgball="${pkgname}.tar.gz"
+
+
+    verbose "Build: Building ${pkgname}"
+
+    dirs=()
+    [[ -d "${1}/bin" ]] && dirs+=("bin")
+    [[ -d "${1}/man" ]] && dirs+=("man")
+
+    tar czf "${pkgball}" -C "${1}" "${dirs[@]}"
+
+    crc32=$(crc32 "${pkgball}")
+
+    target=${PEPM_BUILD_TARGET:-$PEPM_TARGET}
+
+    echo "Package built as ${pkgball}"
+    echo "You'll need a line like this in your packages file (correct the target if needed):"
+    echo "${pkgname} ${2} ${crc32} ${target}"
+}
+
+function pepm_commands {
+    local functions=($(declare -F | awk '{ print $3 }' | grep '^pepm_'))
+
+    for func in ${functions[*]}; do
+        echo -e "\t${func#pepm_}"
+    done
+}
+
+#########
+# SETUP #
+#########
+
+# Test dependencies.
+
+deps=(arch uname curl grep egrep awk cut gcc crc32 tar)
+
+for dep in ${deps[*]}; do
+    ensure installed "${dep}"
+done
+
+# Load and validate configuration.
+
+PEPM_CONFIG="${HOME}/.config/pepmrc"
+PEPM_STORE="${HOME}/.local/share/pepm"
+PEPM_MANIFEST="${PEPM_STORE}/pepm.list"
+
+mkdir -p "${PEPM_STORE}"
+mkdir -p "${PEPM_STORE}/pkg"
+
+[[ -f "${PEPM_CONFIG}" ]] || die "Missing config: ${PEPM_CONFIG}"
+
+source "${PEPM_CONFIG}"
+
+[[ -n "${PEPM_SOURCE}" ]] || die "Unset \$PEPM_SOURCE. Check your config."
+
+verbose "Using PEPM_SOURCE=${PEPM_SOURCE}"
+
+# Users can set these manually, but probably shouldn't in most cases.
+PEPM_TARGET=${PEPM_TARGET:-$(gcc -dumpmachine)}
+PEPM_BIN=${PEPM_BIN:-"${HOME}/bin"}
+PEPM_MAN=${PEPM_MAN:-"${HOME}/man"}
+
+mkdir -p "${PEPM_BIN}"
+mkdir -p "${PEPM_MAN}"
+
+verbose "Using PEPM_TARGET=${PEPM_TARGET}, PEPM_BIN=${PEPM_BIN}, PEPM_MAN=${PEPM_MAN}"
+
+####################
+# COMMAND HANDLING #
+####################
+
+[[ -n "${1}" ]] || usage
+
+cmd="${1}" && shift
+
+# pepm_commands
+
+grep -q "${cmd}" <(pepm_commands) || die "No such command: ${cmd}"
+
+"pepm_${cmd}" "${@}"
